@@ -1,0 +1,135 @@
+//--------------------------------------------
+// 1. ROI – Henry Island
+//--------------------------------------------
+var roi = ee.Geometry.Polygon([
+  [[88.16, 21.62],
+   [88.32, 21.62],
+   [88.32, 21.47],
+   [88.16, 21.47]]
+]);
+
+Map.centerObject(roi, 12);
+
+
+//--------------------------------------------
+// 2. Sentinel-2 SR Cloud Mask (SCL)
+//--------------------------------------------
+function maskS2(image) {
+  var scl = image.select('SCL');
+
+  var good = scl.eq(4)    // vegetation
+    .or(scl.eq(5))       // bare soil
+    .or(scl.eq(6))       // water
+    .or(scl.eq(7));      // unclassified
+
+  good = good
+    .and(scl.neq(3))     // cloud shadow
+    .and(scl.neq(8))     // cloud medium
+    .and(scl.neq(9))     // cloud high
+    .and(scl.neq(10));   // cirrus
+
+  return image.updateMask(good);
+}
+
+
+//--------------------------------------------
+// 3. Compute LAI (FLOAT ONLY)
+//--------------------------------------------
+function computeLAI(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']);
+  var lai = ndvi.multiply(3.618).subtract(0.118);
+  return lai.rename('LAI').toFloat();
+}
+
+
+//--------------------------------------------
+// 4. Load Sentinel-2 SR
+//--------------------------------------------
+function loadS2(start, end) {
+  return ee.ImageCollection('COPERNICUS/S2_SR')
+    .filterBounds(roi)
+    .filterDate(start, end)
+    .map(maskS2)
+    .map(computeLAI);
+}
+
+
+//--------------------------------------------
+// 5. SAFE MONTHLY COMPOSITE (LAI-ONLY FLOAT)
+//--------------------------------------------
+function monthlyLAI(start, end) {
+  var startDate = ee.Date(start);
+  var endDate = ee.Date(end);
+
+  var months = ee.List.sequence(
+    0,
+    endDate.difference(startDate, 'month').subtract(1)
+  );
+
+  return ee.ImageCollection(months.map(function(m) {
+    var date = startDate.advance(m, 'month');
+    var col = loadS2(date, date.advance(1, 'month'));
+
+    var lai = ee.Image(
+      ee.Algorithms.If(
+        col.size().gt(0),
+        col.mean(),                        // FLOAT
+        ee.Image.constant(0).toFloat()     // FLOAT
+      )
+    );
+
+    // FORCE geometry & band only
+    return lai
+      .rename('LAI')
+      .clip(roi)
+      .set('system:time_start', date.millis());
+  }));
+}
+
+
+//--------------------------------------------
+// 6. Phases
+//--------------------------------------------
+var pre    = monthlyLAI('2016-01-01', '2018-12-31');
+var during = monthlyLAI('2019-01-01', '2020-12-31');
+var post   = monthlyLAI('2021-01-01', '2023-12-31');
+
+
+//--------------------------------------------
+// 7. Visual check
+//--------------------------------------------
+Map.addLayer(pre.first(),
+  {min: 0, max: 5, palette: ['red','yellow','green']},
+  'LAI Pre Sample'
+);
+
+
+//--------------------------------------------
+// 8. EXPORT — ZERO BYTE / ZERO FLOAT64 ERRORS
+//--------------------------------------------
+Export.image.toDrive({
+  image: pre.toBands(),
+  description: 'LAI_pre_phase',
+  folder: 'PG_STGC',
+  region: roi,
+  scale: 10,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: during.toBands(),
+  description: 'LAI_during_phase',
+  folder: 'PG_STGC',
+  region: roi,
+  scale: 10,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: post.toBands(),
+  description: 'LAI_post_phase',
+  folder: 'PG_STGC',
+  region: roi,
+  scale: 10,
+  maxPixels: 1e13
+});
