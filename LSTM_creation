@@ -1,0 +1,99 @@
+# ------------------------------
+# 0) Install dependencies
+# ------------------------------
+!pip install scikit-fuzzy nolds tensorflow
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from sklearn.preprocessing import MinMaxScaler
+import skfuzzy as fuzz
+import nolds
+
+# ------------------------------
+# 1) Load data
+# ------------------------------
+# 1) Load data manually
+# ------------------------------
+from google.colab import files  # works in Colab; remove this line if in Jupyter
+
+print("📂 Please upload your CSV file (e.g., Cyclone_Veg_Indices_5day.csv)")
+uploaded = files.upload()  # opens file upload dialog
+
+# Get the uploaded file name automatically
+CSV_PATH = list(uploaded.keys())[0]
+df = pd.read_csv(CSV_PATH)
+
+print(f"✅ File '{CSV_PATH}' loaded successfully!")
+
+df['center_date'] = pd.to_datetime(df['center_date'])
+df = df.sort_values('center_date').reset_index(drop=True)
+
+features = ['LAI','MVI','NDVI','NDWI']  # adjust names if needed
+data = df[features].values
+
+# Scale data for LSTM
+scaler = MinMaxScaler()
+scaled = scaler.fit_transform(data)
+
+# ------------------------------
+# 2) Prepare supervised LSTM data
+# ------------------------------
+SEQ_LEN = 12   # use past 12 months to predict next
+X, y = [], []
+for i in range(len(scaled) - SEQ_LEN):
+    X.append(scaled[i:i+SEQ_LEN])
+    y.append(scaled[i+SEQ_LEN,0])  # predict LAI (col 0), can change
+X, y = np.array(X), np.array(y)
+
+# Train/test split
+split = int(len(X)*0.8)
+X_train, X_test = X[:split], X[split:]
+y_train, y_test = y[:split], y[split:]
+
+# ------------------------------
+# 3) Define LSTM model
+# ------------------------------
+model = Sequential([
+    LSTM(64, activation='tanh', return_sequences=True, input_shape=(SEQ_LEN, X.shape[2])),
+    Dropout(0.2),
+    LSTM(32, activation='tanh'),
+    Dense(1)
+])
+model.compile(optimizer='adam', loss='mse')
+model.summary()
+
+# ------------------------------
+# 4) Train model
+# ------------------------------
+history = model.fit(X_train, y_train, epochs=50, batch_size=16,
+                    validation_data=(X_test, y_test), verbose=1)
+
+# ------------------------------
+# 5) Predictions
+# ------------------------------
+y_pred = model.predict(X_test)
+y_pred_inv = scaler.inverse_transform(
+    np.hstack([y_pred, np.zeros((len(y_pred), scaled.shape[1]-1))])
+)[:,0]   # inverse transform LAI only
+y_test_inv = scaler.inverse_transform(
+    np.hstack([y_test.reshape(-1,1), np.zeros((len(y_test), scaled.shape[1]-1))])
+)[:,0]
+
+# ------------------------------
+# 6) Plot results
+# ------------------------------
+plt.figure(figsize=(12,5))
+plt.plot(df['center_date'].values[-len(y_test):], y_test_inv, label="Actual LAI")
+plt.plot(df['center_date'].values[-len(y_test):], y_pred_inv, label="Predicted LAI")
+plt.title("LSTM Forecast of LAI")
+plt.xlabel("Time")
+plt.ylabel("LAI")
+plt.legend()
+plt.show()
+
+
+
