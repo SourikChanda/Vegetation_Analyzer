@@ -1,0 +1,120 @@
+# ------------------------------
+# 0) Install dependencies
+# ------------------------------
+!pip install scikit-fuzzy tensorflow nolds
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from sklearn.preprocessing import MinMaxScaler
+import skfuzzy as fuzz
+import nolds
+from google.colab import files  # Import files for Colab
+
+# ------------------------------
+# 1) Manual CSV Upload
+# ------------------------------
+print("📂 Please upload your CSV file (e.g., Cyclone_Veg_Indices_5day.csv)")
+uploaded = files.upload()  # Use Colab's file upload
+
+# Check if a file was uploaded
+if len(uploaded) == 0:
+    print("❌ No file uploaded. Please upload a CSV file to continue.")
+else:
+    # Automatically get the uploaded file name
+    CSV_PATH = list(uploaded.keys())[0]
+    df = pd.read_csv(CSV_PATH)
+    df['center_date'] = pd.to_datetime(df['center_date'])
+    df = df.sort_values('center_date').reset_index(drop=True)
+
+    print(f"✅ Loaded {len(df)} records from {CSV_PATH}")
+
+    # ------------------------------
+    # 2) Preprocessing
+    # ------------------------------
+    features = ['LAI', 'MVI', 'NDVI', 'NDWI']
+    df_processed = df[features].dropna()
+    data = df_processed.values
+
+    # Check if data is empty after dropping NaNs
+    if data.shape[0] == 0:
+        print("❌ Error: No valid data remaining after dropping rows with missing values.")
+    else:
+        if np.isnan(data).any():
+            print("⚠️ Warning: NaN values found in the data after dropping rows with NaNs.")
+
+        # Normalize data
+        scaler = MinMaxScaler()
+        data_scaled = scaler.fit_transform(data)
+
+        # Separate target (LAI) and conditional features
+        X_cond = data_scaled[:, 1:]   # MVI, NDVI, NDWI
+        y_real = data_scaled[:, 0]    # LAI
+
+        # ------------------------------
+        # 3) Bootstrap-based Synthetic Data Generation
+        # ------------------------------
+        print("🔁 Applying simple bootstrapping with Gaussian noise...")
+
+        n_samples = len(X_cond)
+        noise_level = 0.02  # 2% noise — tweak as needed
+
+        # Resample indices with replacement
+        bootstrap_indices = np.random.randint(0, n_samples, size=n_samples)
+        X_bootstrap = X_cond[bootstrap_indices]
+        y_bootstrap = y_real[bootstrap_indices]
+
+        # Add Gaussian noise for variability
+        X_synthetic = X_bootstrap + np.random.normal(0, noise_level, X_bootstrap.shape)
+        y_synthetic = y_bootstrap + np.random.normal(0, noise_level, y_bootstrap.shape)
+
+        # Combine real + synthetic
+        X_aug = np.vstack([X_cond, X_synthetic])
+        y_aug = np.hstack([y_real, y_synthetic])
+
+        print(f"✅ Generated {len(y_synthetic)} synthetic samples via bootstrapping!")
+
+        # Inverse scale for interpretability
+        lai_combined_inv = scaler.inverse_transform(
+            np.hstack([y_aug.reshape(-1, 1), X_aug])
+        )[:, 0]
+
+        # ------------------------------
+        # 4) Apply Fuzzy Clustering
+        # ------------------------------
+        lai_norm = (lai_combined_inv - lai_combined_inv.min()) / (lai_combined_inv.max() - lai_combined_inv.min())
+        lai_reshaped = np.expand_dims(lai_norm, axis=0)
+
+        cntr, u, _, _, _, _, _ = fuzz.cluster.cmeans(
+            lai_reshaped, c=3, m=2.0, error=0.005, maxiter=1000, init=None
+        )
+
+        cluster_membership = np.argmax(u, axis=0)
+
+        plt.figure(figsize=(10, 4))
+        plt.scatter(range(len(lai_combined_inv)), lai_combined_inv, c=cluster_membership, cmap='viridis', s=10)
+        plt.title("Fuzzy Clustering of Real + Bootstrapped LAI Data")
+        plt.xlabel("Sample Index")
+        plt.ylabel("LAI")
+        plt.colorbar(label='Cluster ID')
+        plt.show()
+
+        # ------------------------------
+        # 5) Chaos Indicators
+        # ------------------------------
+        lyap = nolds.lyap_r(lai_combined_inv)
+        dfa = nolds.dfa(lai_combined_inv)
+        corr_dim = nolds.corr_dim(lai_combined_inv, emb_dim=5)
+
+        print(f"\n📊 Chaos Metrics:")
+        print(f"Largest Lyapunov exponent: {lyap:.4f}")
+        print(f"DFA (α): {dfa:.4f}")
+        print(f"Correlation dimension: {corr_dim:.4f}")
+
+        if lyap > 0:
+            print("✅ Vegetation dynamics appear chaotic.")
+        elif lyap < 0:
+            print("🌀 Vegetation dynamics appear stable or periodic.")
+        else:
+            print("⚙️ Vegetation dynamics are likely stochastic or noise-driven.")
