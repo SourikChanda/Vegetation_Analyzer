@@ -1,0 +1,121 @@
+// Define AOI
+var aoi = ee.Geometry.Point([88.256667, 21.756667]).buffer(3000);
+Map.centerObject(aoi, 10);
+
+// Function to calculate LAI for an image
+function calcLAI(img) {
+  var NDVI = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var LAI = NDVI.expression(
+    '-1 * log((0.69 - NDVI) / 0.59) / 0.91', {
+      'NDVI': NDVI
+    }).rename('LAI');
+  return LAI.clip(aoi).set('system:time_start', img.get('system:time_start'));
+}
+
+// Load Sentinel-2 and filter clouds for all years needed
+var s2 = ee.ImageCollection("COPERNICUS/S2")
+  .filterBounds(aoi)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+  .map(calcLAI);
+
+// Define phases with date ranges and add a 'phase' property
+var preCycle = s2.filterDate('2016-01-01', '2018-12-31')
+  .map(function(img) { return img.set('phase', 'Pre-Cyclone'); });
+
+var duringCycle = s2.filterDate('2019-01-01', '2020-12-31')
+  .map(function(img) { return img.set('phase', 'During Cyclone'); });
+
+var postCycle = s2.filterDate('2021-01-01', '2024-12-31')
+  .map(function(img) { return img.set('phase', 'Post-Cyclone Recovery'); });
+
+// Combine all phases into one ImageCollection
+var allPhases = preCycle.merge(duringCycle).merge(postCycle);
+
+// Function to add 'month' property as 'YYYY-MM' string for grouping
+function addMonth(img) {
+  var date = ee.Date(img.get('system:time_start'));
+  var monthStr = date.format('YYYY-MM');
+  return img.set('month', monthStr);
+}
+
+allPhases = allPhases.map(addMonth);
+
+// Get list of months in the collection
+var months = allPhases.aggregate_array('month').distinct().sort();
+
+// Function to calculate mean LAI per month and phase
+var monthlyMeanList = months.map(function(month) {
+  var monthImgs = allPhases.filter(ee.Filter.eq('month', month));
+  var phases = monthImgs.aggregate_array('phase').distinct();
+  
+  // For each phase in that month, calculate mean LAI over AOI
+  return phases.map(function(phase) {
+    phase = ee.String(phase);
+    var imgs = monthImgs.filter(ee.Filter.eq('phase', phase));
+    var meanLAI = imgs.mean().reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e9
+    }).get('LAI');
+    
+    return ee.Feature(null, {
+      'month': month,
+      'phase': phase,
+      'mean_LAI': meanLAI
+    });
+  });
+});
+
+// Flatten the nested list of features into one FeatureCollection
+
+// Flatten the nested list of features into one list
+var monthlyMeansListFlat = ee.List(monthlyMeanList).flatten();
+
+// Convert flat list to a FeatureCollection
+var monthlyMeansFlattened = ee.FeatureCollection(monthlyMeansListFlat);
+
+print('Monthly mean LAI FeatureCollection:', monthlyMeansFlattened);
+
+print('Monthly mean LAI FeatureCollection:', monthlyMeansFlattened);
+
+// Export to CSV
+Export.table.toDrive({
+  collection: monthlyMeansFlattened,
+  description: 'Monthly_Mean_LAI_By_Phase',
+  fileFormat: 'CSV',
+  folder: 'earthengine',
+  selectors: ['month', 'phase', 'mean_LAI']
+});
+
+// Create a time series chart
+var chart = ui.Chart.feature.groups({
+  features: monthlyMeansFlattened,
+  xProperty: 'month',
+  yProperty: 'mean_LAI',
+  seriesProperty: 'phase'
+})
+.setChartType('LineChart')
+.setOptions({
+  title: 'Monthly Mean LAI Time Series by Phase',
+  hAxis: {
+    title: 'Month',
+    format: 'yyyy-MM',
+    gridlines: {count: 15},
+    slantedText: true,
+    slantedTextAngle: 45
+  },
+  vAxis: {
+    title: 'Mean LAI',
+    viewWindow: {min: 0, max: 6}
+  },
+  lineWidth: 2,
+  pointSize: 5,
+  series: {
+    0: {color: 'blue'},
+    1: {color: 'red'},
+    2: {color: 'green'}
+  }
+});
+
+print(chart);
